@@ -12,14 +12,15 @@
 /*
 # Groupy 2: tab bar gap fix
 
-On some screen widths (seen on 1366 pixels) the tab bar of a maximized group is
-not painted all the way to the right edge of the screen. The last few pixels
-stay transparent, so whatever is underneath shows through and receives the
-clicks.
+Groupy stops painting its tab bar a few pixels before the right edge of the
+screen (seen on a 1366 pixel wide display). This shows on a maximized group,
+and on any grouped window pushed against or past the right side. The last few
+pixels stay transparent, so whatever is underneath shows through and receives
+the clicks.
 
 This mod runs inside `GroupyCtrl.exe` and extends what Groupy paints: when a
-bar that spans the screen ends in a few transparent columns, they are filled
-with a copy of the last painted column.
+bar that reaches the right edge of the screen stops a few columns short of it,
+those columns are filled with a copy of the last painted column.
 
 Groupy runs elevated, so Windhawk has to run as administrator (or be installed
 as a service) for this mod to load.
@@ -35,9 +36,8 @@ constexpr int kMaxGapToFill = 32;
 
 std::atomic<int> g_lastLoggedGap{-1};
 
-// Whether the given horizontal span covers the whole width of the monitor the
-// window is on, which is the case for the bar of a maximized group.
-bool SpansMonitorWidth(HWND hwnd, int left, int right) {
+// The right edge of the monitor the window is on, in screen coordinates.
+bool GetMonitorRightEdge(HWND hwnd, int* rightEdge) {
     MONITORINFO monitorInfo = {};
     monitorInfo.cbSize = sizeof(monitorInfo);
     HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
@@ -45,8 +45,8 @@ bool SpansMonitorWidth(HWND hwnd, int left, int right) {
         return false;
     }
 
-    return left <= monitorInfo.rcMonitor.left &&
-           right >= monitorInfo.rcMonitor.right;
+    *rightEdge = monitorInfo.rcMonitor.right;
+    return true;
 }
 
 // A copy of the image Groupy is about to show on a tab bar, with the
@@ -100,7 +100,18 @@ bool BuildFilledImage(HWND hwnd,
         left = windowRect.left;
     }
 
-    if (!SpansMonitorWidth(hwnd, left, left + width)) {
+    // Groupy stops painting a few pixels before the right edge of the screen.
+    // That only matters for a bar that reaches the edge or runs past it: a
+    // maximized group, or a window pushed against or beyond the right side.
+    int monitorRight;
+    if (!GetMonitorRightEdge(hwnd, &monitorRight) ||
+        left + width < monitorRight) {
+        return false;
+    }
+
+    // The part of the image that is on this monitor.
+    int visibleWidth = monitorRight - left;
+    if (visibleWidth <= kMaxGapToFill || visibleWidth > width) {
         return false;
     }
 
@@ -137,15 +148,17 @@ bool BuildFilledImage(HWND hwnd,
     }
     GdiFlush();
 
-    // Find where the painting stops, judging by the middle row.
+    // Find where the painting stops short of the screen edge, judging by the
+    // middle row.
     const DWORD* middleRow = pixels + (size_t)(height / 2) * width;
-    int paintedWidth = width;
-    while (paintedWidth > 0 && (middleRow[paintedWidth - 1] >> 24) == 0) {
+    int paintedWidth = visibleWidth;
+    while (paintedWidth > visibleWidth - kMaxGapToFill - 1 &&
+           (middleRow[paintedWidth - 1] >> 24) == 0) {
         paintedWidth--;
     }
 
-    int gap = width - paintedWidth;
-    if (gap == 0 || gap > kMaxGapToFill || paintedWidth == 0) {
+    int gap = visibleWidth - paintedWidth;
+    if (gap == 0 || gap > kMaxGapToFill) {
         return false;
     }
 
@@ -160,7 +173,7 @@ bool BuildFilledImage(HWND hwnd,
             continue;
         }
 
-        for (int x = paintedWidth; x < width; x++) {
+        for (int x = paintedWidth; x < visibleWidth; x++) {
             // Leave anything Groupy did paint in the strip.
             if ((row[x] >> 24) == 0) {
                 row[x] = fill;
