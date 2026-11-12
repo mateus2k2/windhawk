@@ -181,6 +181,72 @@ HRESULT WINAPI XamlTaskViewHost_CreateInstance_Hook(void* param1,
                               param2, param3);
 }
 
+// Offsets for twinui.pcshell.dll builds whose symbols Microsoft hasn't published
+// yet, taken from the ported symbols in windhawk-mod-symbol-cache. Used only
+// when HookSymbols fails and the loaded module matches the build exactly.
+struct KnownBuildOffsets {
+    DWORD timeDateStamp;
+    DWORD sizeOfImage;
+    DWORD isViewVisible;
+    DWORD win32ApplicationViewVtable;
+    DWORD win32ApplicationViewGetNativeWindow;
+    DWORD winRTApplicationViewVtable;
+    DWORD winRTApplicationViewGetNativeWindow;
+    DWORD altTabViewHostCreateInstance;
+    DWORD taskViewHostCreateInstance;
+    DWORD viewShown;
+    DWORD viewDismissed;
+};
+
+constexpr KnownBuildOffsets kKnownBuilds[] = {
+    // 10.0.26100.9974 (KB5132061).
+    {1495861785, 10301440, 0x0010CFF0, 0x00774EB0, 0x0033D7D0, 0x00774698,
+     0x001FA0A0, 0x00100F9C, 0x00705CA0, 0x002593F0, 0x002549C0},
+};
+
+bool HookKnownBuild(HMODULE module) {
+    auto base = (BYTE*)module;
+    auto dosHeader = (IMAGE_DOS_HEADER*)base;
+    auto ntHeaders = (IMAGE_NT_HEADERS*)(base + dosHeader->e_lfanew);
+
+    for (const auto& build : kKnownBuilds) {
+        if (ntHeaders->FileHeader.TimeDateStamp != build.timeDateStamp ||
+            ntHeaders->OptionalHeader.SizeOfImage != build.sizeOfImage) {
+            continue;
+        }
+
+        Wh_Log(L"Using built-in offsets for build %u", build.timeDateStamp);
+
+        CWin32ApplicationView_vtable = base + build.win32ApplicationViewVtable;
+        CWin32ApplicationView_v_GetNativeWindow =
+            (GetNativeWindow_t)(base + build.win32ApplicationViewGetNativeWindow);
+        CWinRTApplicationView_vtable = base + build.winRTApplicationViewVtable;
+        CWinRTApplicationView_v_GetNativeWindow =
+            (GetNativeWindow_t)(base + build.winRTApplicationViewGetNativeWindow);
+
+        Wh_SetFunctionHook(base + build.isViewVisible,
+                           (void*)CVirtualDesktop_IsViewVisible_Hook,
+                           (void**)&CVirtualDesktop_IsViewVisible_Original);
+        Wh_SetFunctionHook(base + build.altTabViewHostCreateInstance,
+                           (void*)XamlAltTabViewHost_CreateInstance_Hook,
+                           (void**)&XamlAltTabViewHost_CreateInstance_Original);
+        Wh_SetFunctionHook(base + build.taskViewHostCreateInstance,
+                           (void*)XamlTaskViewHost_CreateInstance_Hook,
+                           (void**)&XamlTaskViewHost_CreateInstance_Original);
+        Wh_SetFunctionHook(
+            base + build.viewShown,
+            (void*)MultitaskingViewVisibilityService_ViewShown_Hook,
+            (void**)&MultitaskingViewVisibilityService_ViewShown_Original);
+        Wh_SetFunctionHook(
+            base + build.viewDismissed,
+            (void*)MultitaskingViewVisibilityService_ViewDismissed_Hook,
+            (void**)&MultitaskingViewVisibilityService_ViewDismissed_Original);
+        return true;
+    }
+
+    return false;
+}
+
 BOOL Wh_ModInit() {
     HMODULE twinuiPcshellModule = LoadLibrary(L"twinui.pcshell.dll");
     if (!twinuiPcshellModule) {
@@ -240,7 +306,9 @@ BOOL Wh_ModInit() {
                                     twinuiPcshellSymbolHooks,
                                     ARRAYSIZE(twinuiPcshellSymbolHooks))) {
         Wh_Log(L"HookSymbols failed");
-        return FALSE;
+        if (!HookKnownBuild(twinuiPcshellModule)) {
+            return FALSE;
+        }
     }
 
     return TRUE;
